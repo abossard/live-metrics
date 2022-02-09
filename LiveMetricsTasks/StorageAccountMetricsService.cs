@@ -59,7 +59,8 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
         {
             _logger.LogDebug("{ClassName} is disabled", GetType().Name);
             return Task.CompletedTask;
-        }        
+        }
+
         _timer = new Timer(DoWork, null, TimeSpan.Zero, TimeSpan.FromSeconds(_config.IntervalInSeconds));
         _token = cancellationToken;
         _logger.LogDebug("StorageAccountMetricsService started");
