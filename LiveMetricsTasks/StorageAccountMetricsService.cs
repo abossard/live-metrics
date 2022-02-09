@@ -1,4 +1,3 @@
-using System.ComponentModel.DataAnnotations;
 using System.Text.RegularExpressions;
 using Azure.Storage.Blobs;
 using Microsoft.Extensions.Options;
@@ -10,17 +9,18 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
 {
     private const string AccountNamePattern = "AccountName=([^;]*)";
     private readonly StorageAccountMetricsOptions _config;
+
+    //private bool _isWorking;
+    private readonly Dictionary<string, bool> _isWorkingCache = new();
     private readonly ILogger<StorageAccountMetricsService> _logger;
 
     private readonly IEnumerable<(
-            StorageAccountMetricsServiceOptionEntry account,
+            StorageAccountMetricsOptionsAccount account,
             IEnumerable<(string container,
                 Gauge count,
                 Gauge threshold)> containers)>
         _monitorSubjects;
 
-    //private bool _isWorking;
-    private readonly Dictionary<string, bool> _isWorkingCache = new();
     private Timer? _timer;
     private CancellationToken _token;
 
@@ -31,7 +31,7 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
     {
         _logger = logger;
         _config = config.Value;
-        _monitorSubjects = (_config.Accounts ?? Array.Empty<StorageAccountMetricsServiceOptionEntry>()).Select(
+        _monitorSubjects = (_config.Accounts ?? Array.Empty<StorageAccountMetricsOptionsAccount>()).Select(
             account =>
                 (account,
                     containers: (account.Containers ?? Array.Empty<string>()).Select(container =>
@@ -87,13 +87,12 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
     {
         var lockKey = container.Uri.ToString();
         if (_isWorkingCache.TryGetValue(lockKey, out var isWorking))
-        {
             if (isWorking)
             {
                 _logger.LogDebug("Already working on {ContainerName}", container.Name);
                 return;
             }
-        }
+
         _isWorkingCache[lockKey] = true;
         var count = 0;
         var respectThreshold = _config.CutoffThreshold > 0;
@@ -103,9 +102,12 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
             count += 1;
             if (respectThreshold && count >= _config.CutoffThreshold)
             {
-                _logger.LogDebug("Cutoff threshold reached for {MetricName} and cutoff {Cutoff}", threshold.Name, _config.CutoffThreshold);
+                _logger.LogDebug("Cutoff threshold reached for {MetricName} and cutoff {Cutoff}", threshold.Name,
+                    _config.CutoffThreshold);
                 break;
-            };
+            }
+
+            ;
         }
 
         countMetric.Set(count);
