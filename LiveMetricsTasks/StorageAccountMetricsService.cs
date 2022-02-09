@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using System.Text.RegularExpressions;
 using Azure.Storage.Blobs;
 using Microsoft.Extensions.Options;
@@ -18,7 +19,8 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
                 Gauge threshold)> containers)>
         _monitorSubjects;
 
-    private bool _isWorking;
+    //private bool _isWorking;
+    private readonly Dictionary<string, bool> _isWorkingCache = new();
     private Timer? _timer;
     private CancellationToken _token;
 
@@ -80,11 +82,22 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
             "1 for above  threshold, 0 for below threshold");
     }
 
-    private async Task<int> MeasureBlobCount(BlobContainerClient container, Gauge countMetric, Gauge threshold,
+    private async Task MeasureBlobCount(BlobContainerClient container, Gauge countMetric, Gauge threshold,
         string filePrefix = "", CancellationToken cancellationToken = default)
     {
+        var lockKey = container.Uri.ToString();
+        if (_isWorkingCache.TryGetValue(lockKey, out var isWorking))
+        {
+            if (isWorking)
+            {
+                _logger.LogDebug("Already working on {ContainerName}", container.Name);
+                return;
+            }
+        }
+        _isWorkingCache[lockKey] = true;
         var count = 0;
         var respectThreshold = _config.CutoffThreshold > 0;
+        _logger.LogDebug("Start to measuring blob count for {ContainerName}", container.Name);
         await foreach (var unused in container.GetBlobsAsync(prefix: filePrefix, cancellationToken: cancellationToken))
         {
             count += 1;
@@ -98,7 +111,8 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
         countMetric.Set(count);
         threshold.Set(count >= _config.CutoffThreshold ? 1 : 0);
         _logger.LogDebug("Set {MetricName} to {Count}", countMetric.Name, count);
-        return count;
+        _logger.LogDebug("Finished measuring blob count for {ContainerName}", container.Name);
+        _isWorkingCache[lockKey] = false;
     }
 
     private async Task UpdateMetricForBlobAccount(string? connectionString,
@@ -119,19 +133,11 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
 
     private void DoWork(object? state)
     {
-        if (_isWorking)
-        {
-            _logger.LogDebug("StorageAccountMetricsService is already working");
-            return;
-        }
-
         _logger.LogDebug("StorageAccountMetricsService is working");
-        _isWorking = true;
         var accountTasks = _monitorSubjects
             .Select(item => UpdateMetricForBlobAccount(item.account.ConnectionString, item.containers, _token))
             .ToArray();
         Task.WaitAll(accountTasks);
-        _isWorking = false;
         _logger.LogDebug("StorageAccountMetricsService finished");
     }
 }
