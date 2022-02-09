@@ -22,7 +22,7 @@ try
     builder.Services.AddEndpointsApiExplorer();
     builder.Services.AddSwaggerGen();
     builder.Services.Configure<StorageAccountMetricsOptions>(
-        builder.Configuration.GetSection("LiveMetrics").GetSection(nameof (StorageAccountMetricsOptions))
+        builder.Configuration.GetSection("LiveMetrics").GetSection(nameof(StorageAccountMetricsOptions))
     );
     builder.Services.AddHostedService<StorageAccountMetricsService>();
 
