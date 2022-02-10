@@ -66,18 +66,26 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
     private static IEnumerable<ConfigurationSet> GetMetricsSetupFromConnectionString(
         ServiceBusQueueMetricsOptionsAccount account)
     {
-        return account.Queues.Select(queue => new ConfigurationSet(
-            account.ResourceGroup,
-            account.Namespace,
-            queue,
-            Metrics.CreateGauge($"{account.Namespace}_{queue}_active_message_count", "Active message count"),
-            Metrics.CreateGauge($"{account.Namespace}_{queue}_dead_letter_message_count", "Dead letter message count"),
-            Metrics.CreateGauge($"{account.Namespace}_{queue}_scheduled_message_count", "Scheduled message count"),
-            Metrics.CreateGauge($"{account.Namespace}_{queue}_transfer_dead_letter_message_count",
-                "Transfer dead letter message count"),
-            Metrics.CreateGauge($"{account.Namespace}_{queue}_transfer_message_count", "Transfer message count"),
-            Metrics.CreateGauge($"{account.Namespace}_{queue}_message_count", "Message count")
-        ));
+        return account.Queues.Select(queue =>
+        {
+            var queueSanitized = queue.Replace("-", "_");
+            return new ConfigurationSet(
+                account.ResourceGroup,
+                account.Namespace,
+                queue,
+                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_active_message_count",
+                    "Active message count"),
+                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_dead_letter_message_count",
+                    "Dead letter message count"),
+                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_scheduled_message_count",
+                    "Scheduled message count"),
+                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_transfer_dead_letter_message_count",
+                    "Transfer dead letter message count"),
+                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_transfer_message_count",
+                    "Transfer message count"),
+                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_message_count", "Message count")
+            );
+        });
     }
 
 
