@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.30114.105
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveMetrics", "LiveMetrics\LiveMetrics.csproj", "{44E33639-463B-473E-8A76-1B645E541EB7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiveMetricsTests", "LiveMetricsTests\LiveMetricsTests.csproj", "{8BF29C44-7456-4AFA-9A76-EF73DF93E6C8}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{44E33639-463B-473E-8A76-1B645E541EB7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{44E33639-463B-473E-8A76-1B645E541EB7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{44E33639-463B-473E-8A76-1B645E541EB7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{44E33639-463B-473E-8A76-1B645E541EB7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8BF29C44-7456-4AFA-9A76-EF73DF93E6C8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8BF29C44-7456-4AFA-9A76-EF73DF93E6C8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8BF29C44-7456-4AFA-9A76-EF73DF93E6C8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8BF29C44-7456-4AFA-9A76-EF73DF93E6C8}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

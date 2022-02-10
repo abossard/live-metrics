@@ -5,6 +5,7 @@ using Azure.ResourceManager.Resources;
 using Azure.ResourceManager.ServiceBus;
 using Microsoft.Extensions.Options;
 using Prometheus;
+using static LiveMetrics.LiveMetricsUtils;
 
 namespace LiveMetrics.LiveMetricsTasks;
 
@@ -14,7 +15,7 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
 
     private readonly ILogger<ServiceBusQueueMetricsService> _logger;
 
-    private readonly IEnumerable<ConfigurationSet> _monitorSubjects;
+    private IEnumerable<ConfigurationSet>? _monitorSubjects;
     private readonly Dictionary<string, ServiceBusNamespace> _serviceBusNamespaceCache = new();
     private ArmClient? _armClient;
     private bool _isWorking;
@@ -28,9 +29,18 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
     {
         _logger = logger;
         _config = config.Value;
-        _monitorSubjects = (_config.Accounts ?? Array.Empty<ServiceBusQueueMetricsOptionsAccount>())
-            .Select(GetMetricsSetupFromConnectionString).SelectMany(x => x);
         _logger.LogDebug("{ClassName} initialized", GetType().Name);
+    }
+
+    private async Task<IEnumerable<ConfigurationSet>> GenerateMonitoringSubjectForAsync(ServiceBusQueueMetricsOptionsAccount account)
+    {
+        _logger.LogDebug("Generating Monitoring Subject for {ResourceGroup} and {Namespace}", account.ResourceGroup, account.Namespace);
+        var serviceBusNamespace = await GetServiceBusNamespaceAsync(account.ResourceGroup, account.Namespace, _token);
+        var haystack = await serviceBusNamespace.GetServiceBusQueues().GetAllAsync().Select(item=> item.Data.Name).ToListAsync(_token);
+        var queues = ApplyWildcardToFilterList(haystack, account.Queues);
+        var result = queues.Select(queue => GetMetricsSetupFromConnectionString(account.ResourceGroup, account.Namespace, queue)).ToList();
+        _logger.LogDebug("Finished. Applying filters to queues: {Queues}, filtered queues: {FilteredQueues}", haystack, result.Select(x => x.Queue));
+        return result;
     }
 
     public void Dispose()
@@ -39,22 +49,24 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
         GC.SuppressFinalize(this);
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
         if (!_config.Enabled)
         {
             _logger.LogDebug("{ClassName} disabled", GetType().Name);
-            return Task.CompletedTask;
+            return;
         }
 
         _logger.LogDebug("Acquiring Azure Resource Manager credentials");
         _armClient = new ArmClient(new DefaultAzureCredential());
         _logger.LogDebug("Finished acquiring Azure Resource Manager credentials");
-
+        var monitoringTasks = (_config.Accounts ?? Array.Empty<ServiceBusQueueMetricsOptionsAccount>()).Select(GenerateMonitoringSubjectForAsync).ToList();
+        await Task.WhenAll(monitoringTasks);
+        _monitorSubjects = monitoringTasks.SelectMany(task => task.Result);
+        
         _timer = new Timer(DoWork, null, TimeSpan.Zero, TimeSpan.FromSeconds(_config.IntervalInSeconds));
         _token = cancellationToken;
         _logger.LogDebug("{ClassName} started", GetType().Name);
-        return Task.CompletedTask;
     }
 
     public Task StopAsync(CancellationToken cancellationToken)
@@ -64,48 +76,50 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
         return Task.CompletedTask;
     }
 
-    private static IEnumerable<ConfigurationSet> GetMetricsSetupFromConnectionString(
-        ServiceBusQueueMetricsOptionsAccount account)
+    private static ConfigurationSet GetMetricsSetupFromConnectionString(string? resourceGroup, string? namespaceName, string queue)
     {
-        return account.Queues.Select(queue =>
-        {
-            var queueSanitized = queue.Replace("-", "_").Replace(".", "_");
-            return new ConfigurationSet(
-                account.ResourceGroup,
-                account.Namespace,
-                queue,
-                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_active_message_count",
-                    "Active message count"),
-                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_dead_letter_message_count",
-                    "Dead letter message count"),
-                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_scheduled_message_count",
-                    "Scheduled message count"),
-                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_transfer_dead_letter_message_count",
-                    "Transfer dead letter message count"),
-                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_transfer_message_count",
-                    "Transfer message count"),
-                Metrics.CreateGauge($"{account.Namespace}_{queueSanitized}_message_count", "Message count")
-            );
-        });
+        return new ConfigurationSet(
+            resourceGroup,
+            namespaceName,
+            queue,
+            Metrics.CreateGauge(
+                GetMetricsNameFor("queue", "active_message_count", namespaceName,
+                    queue),
+                "Active message count"),
+            Metrics.CreateGauge(GetMetricsNameFor("queue", "dead_letter_message_count", namespaceName, queue),
+                "Dead letter message count"),
+            Metrics.CreateGauge(GetMetricsNameFor("queue", "scheduled_message_count", namespaceName, queue),
+                "Scheduled message count"),
+            Metrics.CreateGauge(
+                GetMetricsNameFor("queue", "transfer_dead_letter_message_count", namespaceName, queue),
+                "Transfer dead letter message count"),
+            Metrics.CreateGauge(GetMetricsNameFor("queue", "transfer_message_count", namespaceName, queue),
+                "Transfer message count"),
+            Metrics.CreateGauge(GetMetricsNameFor("queue", "message_count", namespaceName, queue), "Message count")
+        );
     }
 
-
+    private async Task<ServiceBusNamespace> GetServiceBusNamespaceAsync(string? resourceGroup, string? namespaceName, CancellationToken cancellationToken=default)
+    {
+        var cacheKey = $"{resourceGroup}_{namespaceName}";
+        if (_serviceBusNamespaceCache.TryGetValue(cacheKey, out var serviceBusNamespace)) return serviceBusNamespace;
+        Debug.Assert(_armClient != null, nameof(_armClient) + " != null");
+        var sub = await _armClient.GetDefaultSubscriptionAsync(cancellationToken);
+        ResourceGroup resourceGroupArm =
+            await sub.GetResourceGroups().GetAsync(resourceGroup, cancellationToken);
+        serviceBusNamespace = await resourceGroupArm.GetServiceBusNamespaces()
+            .GetAsync(namespaceName, cancellationToken);
+        _serviceBusNamespaceCache[cacheKey] = serviceBusNamespace;
+        return serviceBusNamespace;
+    }
     private async Task CreateUpdateMetricForServiceBusQueueTask(ConfigurationSet configurationSet,
         CancellationToken cancellationToken = default)
     {
-        var cacheKey = $"{configurationSet.ResourceGroup}_{configurationSet.NamespaceName}";
+        
         _logger.LogDebug("Starting to update metrics for {NamespaceName} and {Queue}", configurationSet.NamespaceName,
             configurationSet.Queue);
-        if (!_serviceBusNamespaceCache.TryGetValue(cacheKey, out var serviceBusNamespace))
-        {
-            Debug.Assert(_armClient != null, nameof(_armClient) + " != null");
-            var sub = await _armClient.GetDefaultSubscriptionAsync(cancellationToken);
-            ResourceGroup resourceGroup =
-                await sub.GetResourceGroups().GetAsync(configurationSet.ResourceGroup, cancellationToken);
-            serviceBusNamespace = await resourceGroup.GetServiceBusNamespaces()
-                .GetAsync(configurationSet.NamespaceName, cancellationToken);
-            _serviceBusNamespaceCache[cacheKey] = serviceBusNamespace;
-        }
+        var serviceBusNamespace = await GetServiceBusNamespaceAsync(configurationSet.ResourceGroup,
+            configurationSet.NamespaceName, cancellationToken);
 
         ServiceBusQueue queue = await serviceBusNamespace.GetServiceBusQueues()
             .GetAsync(configurationSet.Queue, cancellationToken);
@@ -137,7 +151,7 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
 
         _isWorking = true;
         _logger.LogDebug("{ClassName} is working", GetType().Name);
-        var accountTasks = _monitorSubjects
+        var accountTasks = (_monitorSubjects ?? Array.Empty<ConfigurationSet>())
             .Select(item => CreateUpdateMetricForServiceBusQueueTask(item, _token))
             .ToArray();
         Task.WaitAll(accountTasks, _token);
@@ -145,7 +159,7 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
         _isWorking = false;
     }
 
-    private record struct ConfigurationSet(string ResourceGroup, string NamespaceName,
+    private record struct ConfigurationSet(string? ResourceGroup, string? NamespaceName,
         string Queue, Gauge ActiveMessageCount, Gauge DeadLetterMessageCount, Gauge ScheduledMessageCount,
         Gauge TransferDeadLetterMessageCount, Gauge TransferMessageCount, Gauge MessageCount);
 }
