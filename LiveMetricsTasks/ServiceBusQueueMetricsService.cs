@@ -68,7 +68,7 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
     {
         return account.Queues.Select(queue =>
         {
-            var queueSanitized = queue.Replace("-", "_");
+            var queueSanitized = queue.Replace("-", "_").Replace(".", "_");
             return new ConfigurationSet(
                 account.ResourceGroup,
                 account.Namespace,
