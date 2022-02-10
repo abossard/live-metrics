@@ -140,7 +140,7 @@ public class ServiceBusMetricsService : IHostedService, IDisposable
         return new QueueConfigurationSet(
             resourceGroup,
             namespaceName,
-            queue, 
+            queue,
             CreateMetricMessageCount("queue", resourceGroup, namespaceName),
             CreateGaugeSet("queue", resourceGroup, namespaceName, queue));
     }
@@ -155,7 +155,24 @@ public class ServiceBusMetricsService : IHostedService, IDisposable
             namespaceName,
             topic,
             CreateGaugeSet("topic", resourceGroup, namespaceName, topic),
-            Array.Empty<SubscriptionConfigurationSet>());
+            subscriptions.Select(subscription => CreateSubscriptionMetricsSetup(
+                resourceGroup,
+                namespaceName,
+                topic,
+                subscription
+            )));
+    }
+
+    private static SubscriptionConfigurationSet CreateSubscriptionMetricsSetup(string? resourceGroup,
+        string? namespaceName,
+        string topic, string subscription)
+    {
+        Debug.Assert(resourceGroup != null, nameof(resourceGroup) + " != null");
+        Debug.Assert(namespaceName != null, nameof(namespaceName) + " != null");
+        return new SubscriptionConfigurationSet(
+            subscription,
+            CreateMetricMessageCount("subscription", resourceGroup, namespaceName, topic, subscription),
+            CreateGaugeSet("subscription", resourceGroup, namespaceName, topic, subscription));
     }
 
     private async Task<ServiceBusNamespace> GetServiceBusNamespaceAsync(string? resourceGroup, string? namespaceName,
@@ -173,9 +190,9 @@ public class ServiceBusMetricsService : IHostedService, IDisposable
         return serviceBusNamespace;
     }
 
-    private static void UpdateGaugeSet(DetailCountGaugeSet detailCountGauges, 
-        long? activeMessageCount, 
-        long? deadLetterMessageCount, 
+    private static void UpdateGaugeSet(DetailCountGaugeSet detailCountGauges,
+        long? activeMessageCount,
+        long? deadLetterMessageCount,
         long? scheduledMessageCount,
         long? transferDeadLetterMessageCount,
         long? transferMessageCount
@@ -192,23 +209,39 @@ public class ServiceBusMetricsService : IHostedService, IDisposable
             detailCountGauges.TransferDeadLetterMessageCount.Set((double)transferDeadLetterMessageCount);
         if (transferMessageCount != null)
             detailCountGauges.TransferMessageCount.Set((double)transferMessageCount);
-    } 
-    private async Task CreateUpdateMetricForServiceBusTopicTask(TopicConfigurationSet topicConfigurationSet,
+    }
+
+    private async Task UpdateMetricForServiceBusTopicTask(TopicConfigurationSet topicConfigurationSet,
         CancellationToken cancellationToken = default)
     {
         _logger.LogDebug("Starting to update metrics for {NamespaceName} and topic: {Topic}",
             topicConfigurationSet.NamespaceName, topicConfigurationSet.Topic);
         var serviceBusNamespace = await GetServiceBusNamespaceAsync(topicConfigurationSet.ResourceGroup,
             topicConfigurationSet.NamespaceName, cancellationToken);
-        ServiceBusTopic topic = await serviceBusNamespace.GetServiceBusTopics().GetAsync(topicConfigurationSet.Topic);
+        ServiceBusTopic topic = await serviceBusNamespace.GetServiceBusTopics()
+            .GetAsync(topicConfigurationSet.Topic, cancellationToken);
         UpdateGaugeSet(topicConfigurationSet.TopicDetailCountGauges,
             topic.Data.CountDetails.ActiveMessageCount,
             topic.Data.CountDetails.DeadLetterMessageCount,
             topic.Data.CountDetails.ScheduledMessageCount,
             topic.Data.CountDetails.TransferDeadLetterMessageCount,
             topic.Data.CountDetails.TransferMessageCount);
+        var subscriptionUpdates = topicConfigurationSet.SubscriptionConfigurationSets.Select(async config =>
+        {
+            ServiceBusSubscription subscription =
+                await topic.GetServiceBusSubscriptions().GetAsync(config.Subscription, cancellationToken);
+            UpdateGaugeSet(config.SubscriptionDetailCountGauges,
+                subscription.Data.CountDetails.ActiveMessageCount,
+                subscription.Data.CountDetails.DeadLetterMessageCount,
+                subscription.Data.CountDetails.ScheduledMessageCount,
+                subscription.Data.CountDetails.TransferDeadLetterMessageCount,
+                subscription.Data.CountDetails.TransferMessageCount);
+            if (subscription.Data.MessageCount != null) config.MessageCount.Set((double)subscription.Data.MessageCount);
+        });
+        await Task.WhenAll(subscriptionUpdates);
     }
-    private async Task CreateUpdateMetricForServiceBusQueueTask(QueueConfigurationSet queueConfigurationSet,
+
+    private async Task UpdateMetricForServiceBusQueueTask(QueueConfigurationSet queueConfigurationSet,
         CancellationToken cancellationToken = default)
     {
         _logger.LogDebug("Starting to update metrics for {NamespaceName} and {Queue}",
@@ -222,10 +255,7 @@ public class ServiceBusMetricsService : IHostedService, IDisposable
         UpdateGaugeSet(queueConfigurationSet.DetailCountGauges, queue.Data.CountDetails.ActiveMessageCount,
             queue.Data.CountDetails.DeadLetterMessageCount, queue.Data.CountDetails.ScheduledMessageCount,
             queue.Data.CountDetails.TransferDeadLetterMessageCount, queue.Data.CountDetails.TransferMessageCount);
-        if (queue.Data.MessageCount != null)
-        {
-            queueConfigurationSet.MessageCount.Set((double)queue.Data.MessageCount);
-        }
+        if (queue.Data.MessageCount != null) queueConfigurationSet.MessageCount.Set((double)queue.Data.MessageCount);
         _logger.LogDebug(
             "Finished updating metrics for {NamespaceName} and {Queue}: {@CountDetails}, {MessageCount}",
             queueConfigurationSet.NamespaceName, queueConfigurationSet.Queue,
@@ -243,25 +273,26 @@ public class ServiceBusMetricsService : IHostedService, IDisposable
         _isWorking = true;
         _logger.LogDebug("{ClassName} is working", GetType().Name);
         var queueTasks = (_monitorQueues ?? Array.Empty<QueueConfigurationSet>())
-            .Select(item => CreateUpdateMetricForServiceBusQueueTask(item, _token))
+            .Select(item => UpdateMetricForServiceBusQueueTask(item, _token))
             .ToArray();
         var topicTasks = (_monitorTopics ?? Array.Empty<TopicConfigurationSet>())
-            .Select(item => CreateUpdateMetricForServiceBusTopicTask(item, _token))
+            .Select(item => UpdateMetricForServiceBusTopicTask(item, _token))
             .ToArray();
         Task.WaitAll(queueTasks.Concat(topicTasks).ToArray(), _token);
         _logger.LogDebug("{ClassName} finished", GetType().Name);
         _isWorking = false;
     }
 
-    private record struct DetailCountGaugeSet(Gauge ActiveMessageCount, Gauge DeadLetterMessageCount, Gauge ScheduledMessageCount,
+    private record struct DetailCountGaugeSet(Gauge ActiveMessageCount, Gauge DeadLetterMessageCount,
+        Gauge ScheduledMessageCount,
         Gauge TransferDeadLetterMessageCount, Gauge TransferMessageCount);
 
     private record struct QueueConfigurationSet(string? ResourceGroup, string? NamespaceName,
         string Queue, Gauge MessageCount, DetailCountGaugeSet DetailCountGauges);
 
     private record struct TopicConfigurationSet(string? ResourceGroup, string? NamespaceName,
-        string Topic, DetailCountGaugeSet TopicDetailCountGauges, IEnumerable<SubscriptionConfigurationSet> SubscriptionConfigurationSets);
+        string Topic, DetailCountGaugeSet TopicDetailCountGauges,
+        IEnumerable<SubscriptionConfigurationSet> SubscriptionConfigurationSets);
 
-    private record struct SubscriptionConfigurationSet(string? ResourceGroup, string? NamespaceName,
-        string Topic, string Subscription, DetailCountGaugeSet SubscriptionDetailCountGauges);
+    private record struct SubscriptionConfigurationSet(string Subscription, Gauge MessageCount, DetailCountGaugeSet SubscriptionDetailCountGauges);
 }
