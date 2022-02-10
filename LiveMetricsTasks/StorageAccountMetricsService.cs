@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using Azure.Storage.Blobs;
 using Microsoft.Extensions.Options;
 using Prometheus;
+using static LiveMetrics.LiveMetricsUtils;
 
 namespace LiveMetrics.LiveMetricsTasks;
 
@@ -13,13 +14,7 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
     //private bool _isWorking;
     private readonly Dictionary<string, bool> _isWorkingCache = new();
     private readonly ILogger<StorageAccountMetricsService> _logger;
-
-    private readonly IEnumerable<(
-            StorageAccountMetricsOptionsAccount account,
-            IEnumerable<(string container,
-                Gauge count,
-                Gauge threshold)> containers)>
-        _monitorSubjects;
+    private readonly IEnumerable<ConfigurationRecord> _monitorSubjects;
 
     private Timer? _timer;
     private CancellationToken _token;
@@ -32,18 +27,21 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
         _logger = logger;
         _config = config.Value;
         _monitorSubjects = (_config.Accounts ?? Array.Empty<StorageAccountMetricsOptionsAccount>()).Select(
-            account =>
-                (account,
-                    containers: (account.Containers ?? Array.Empty<string>()).Select(container =>
-                        (container,
-                            count: CreateCounterMetricFor(
-                                account.ConnectionString ??
-                                throw new InvalidOperationException(
-                                    "ConnectionString is null in account, check appsettings.json"), container),
-                            threshold: CreateThresholdMetricFor(
-                                account.ConnectionString ??
-                                throw new InvalidOperationException(
-                                    "ConnectionString is null in account, check appsettings.json"), container)))));
+            account => new ConfigurationRecord(
+                account,
+                (account.Containers ?? Array.Empty<string>()).Select(container =>
+                    new ContainerMetricsRecord(
+                        container,
+                        CreateCounterMetricFor(
+                            account.ConnectionString ??
+                            throw new InvalidOperationException(
+                                "ConnectionString is null in account, check appsettings.json"), container),
+                        CreateThresholdMetricFor(
+                            account.ConnectionString ??
+                            throw new InvalidOperationException(
+                                "ConnectionString is null in account, check appsettings.json"), container)
+                    ))));
+
         _logger.LogDebug("StorageAccountMetricsService initialized");
     }
 
@@ -77,15 +75,15 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
     private static Gauge CreateCounterMetricFor(string connectionString, string container)
     {
         var accountName = Regex.Match(connectionString, AccountNamePattern).Groups[1].Value;
-        return Metrics.CreateGauge($"blob_{accountName}_{container}_count".Replace("-", "_").ToLowerInvariant(),
-            "Items in Container");
+        var metricName = GetMetricsNameFor("blob", "count", accountName, container);
+        return Metrics.CreateGauge(metricName, "Items in Container");
     }
 
     private static Gauge CreateThresholdMetricFor(string connectionString, string container)
     {
         var accountName = Regex.Match(connectionString, AccountNamePattern).Groups[1].Value;
-        return Metrics.CreateGauge($"blob_{accountName}_{container}_threshold".Replace("-", "_").ToLowerInvariant(),
-            "1 for above  threshold, 0 for below threshold");
+        var metricName = GetMetricsNameFor("blob", "threshold", accountName, container);
+        return Metrics.CreateGauge(metricName, "1 for above  threshold, 0 for below threshold");
     }
 
     private async Task MeasureBlobCount(BlobContainerClient container, Gauge countMetric, Gauge threshold,
@@ -106,14 +104,10 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
         await foreach (var unused in container.GetBlobsAsync(prefix: filePrefix, cancellationToken: cancellationToken))
         {
             count += 1;
-            if (respectThreshold && count >= _config.CutoffThreshold)
-            {
-                _logger.LogDebug("Cutoff threshold reached for {MetricName} and cutoff {Cutoff}", threshold.Name,
-                    _config.CutoffThreshold);
-                break;
-            }
-
-            ;
+            if (!respectThreshold || count < _config.CutoffThreshold) continue;
+            _logger.LogDebug("Cutoff threshold reached for {MetricName} and cutoff {Cutoff}", threshold.Name,
+                _config.CutoffThreshold);
+            break;
         }
 
         countMetric.Set(count);
@@ -124,15 +118,15 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
     }
 
     private async Task UpdateMetricForBlobAccount(string? connectionString,
-        IEnumerable<(string container, Gauge count, Gauge threshold)> containers,
+        IEnumerable<ContainerMetricsRecord> containers,
         CancellationToken cancellationToken = default)
     {
         var blobServiceClient = new BlobServiceClient(connectionString);
         var containerTasks = containers.Select(async container => await
             MeasureBlobCount(
-                blobServiceClient.GetBlobContainerClient(container.container),
-                container.count,
-                container.threshold,
+                blobServiceClient.GetBlobContainerClient(container.Container),
+                container.Count,
+                container.Threshold,
                 cancellationToken: cancellationToken
             )
         );
@@ -143,9 +137,14 @@ public class StorageAccountMetricsService : IHostedService, IDisposable
     {
         _logger.LogDebug("StorageAccountMetricsService is working");
         var accountTasks = _monitorSubjects
-            .Select(item => UpdateMetricForBlobAccount(item.account.ConnectionString, item.containers, _token))
+            .Select(item => UpdateMetricForBlobAccount(item.Account.ConnectionString, item.Containers, _token))
             .ToArray();
         Task.WaitAll(accountTasks);
         _logger.LogDebug("StorageAccountMetricsService finished");
     }
+
+    private record struct ConfigurationRecord(StorageAccountMetricsOptionsAccount Account,
+        IEnumerable<ContainerMetricsRecord> Containers);
+
+    private record struct ContainerMetricsRecord(string Container, Gauge Count, Gauge Threshold);
 }

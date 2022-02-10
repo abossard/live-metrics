@@ -17,9 +17,9 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
     private readonly IEnumerable<ConfigurationSet> _monitorSubjects;
     private readonly Dictionary<string, ServiceBusNamespace> _serviceBusNamespaceCache = new();
     private ArmClient? _armClient;
+    private bool _isWorking;
     private Timer? _timer;
     private CancellationToken _token;
-    private bool _isWorking = false;
 
     public ServiceBusQueueMetricsService(
         ILogger<ServiceBusQueueMetricsService> logger,
@@ -46,10 +46,11 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
             _logger.LogDebug("{ClassName} disabled", GetType().Name);
             return Task.CompletedTask;
         }
+
         _logger.LogDebug("Acquiring Azure Resource Manager credentials");
         _armClient = new ArmClient(new DefaultAzureCredential());
         _logger.LogDebug("Finished acquiring Azure Resource Manager credentials");
-        
+
         _timer = new Timer(DoWork, null, TimeSpan.Zero, TimeSpan.FromSeconds(_config.IntervalInSeconds));
         _token = cancellationToken;
         _logger.LogDebug("{ClassName} started", GetType().Name);
@@ -133,6 +134,7 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
             _logger.LogDebug("{ClassName} is already working", GetType().Name);
             return;
         }
+
         _isWorking = true;
         _logger.LogDebug("{ClassName} is working", GetType().Name);
         var accountTasks = _monitorSubjects
