@@ -21,8 +21,8 @@ try
     builder.Services.Configure<StorageAccountMetricsOptions>(
         builder.Configuration.GetSection("LiveMetrics").GetSection(nameof(StorageAccountMetricsOptions))
     );
-    builder.Services.Configure<ServiceBusQueueMetricsOptions>(
-        builder.Configuration.GetSection("LiveMetrics").GetSection(nameof(ServiceBusQueueMetricsOptions))
+    builder.Services.Configure<ServiceBusMetricsOptions>(
+        builder.Configuration.GetSection("LiveMetrics").GetSection(nameof(ServiceBusMetricsOptions))
     );
     builder.Services.AddHostedService<StorageAccountMetricsService>();
     builder.Services.AddHostedService<ServiceBusQueueMetricsService>();

@@ -11,11 +11,12 @@ namespace LiveMetrics.LiveMetricsTasks;
 
 public class ServiceBusQueueMetricsService : IHostedService, IDisposable
 {
-    private readonly ServiceBusQueueMetricsOptions _config;
+    private readonly ServiceBusMetricsOptions _config;
 
     private readonly ILogger<ServiceBusQueueMetricsService> _logger;
 
-    private IEnumerable<ConfigurationSet>? _monitorSubjects;
+    private IEnumerable<QueueConfigurationSet>? _monitorQueues;
+    private IEnumerable<TopicConfigurationSet>? _monitorTopics;
     private readonly Dictionary<string, ServiceBusNamespace> _serviceBusNamespaceCache = new();
     private ArmClient? _armClient;
     private bool _isWorking;
@@ -24,7 +25,7 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
 
     public ServiceBusQueueMetricsService(
         ILogger<ServiceBusQueueMetricsService> logger,
-        IOptions<ServiceBusQueueMetricsOptions> config
+        IOptions<ServiceBusMetricsOptions> config
     )
     {
         _logger = logger;
@@ -32,14 +33,30 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
         _logger.LogDebug("{ClassName} initialized", GetType().Name);
     }
 
-    private async Task<IEnumerable<ConfigurationSet>> GenerateMonitoringSubjectForAsync(ServiceBusQueueMetricsOptionsAccount account)
+    private async Task<IEnumerable<QueueConfigurationSet>> GenerateMonitoringQueuesAsync(ServiceBusMetricsOptionsAccount account)
     {
         _logger.LogDebug("Generating Monitoring Subject for {ResourceGroup} and {Namespace}", account.ResourceGroup, account.Namespace);
         var serviceBusNamespace = await GetServiceBusNamespaceAsync(account.ResourceGroup, account.Namespace, _token);
         var haystack = await serviceBusNamespace.GetServiceBusQueues().GetAllAsync().Select(item=> item.Data.Name).ToListAsync(_token);
         var queues = ApplyWildcardToFilterList(haystack, account.Queues);
-        var result = queues.Select(queue => GetMetricsSetupFromConnectionString(account.ResourceGroup, account.Namespace, queue)).ToList();
+        var result = queues.Select(queue => CreateQueueMetricsSetup(account.ResourceGroup, account.Namespace, queue)).ToList();
         _logger.LogDebug("Finished. Applying filters to queues: {Queues}, filtered queues: {FilteredQueues}", haystack, result.Select(x => x.Queue));
+        return result;
+    }
+    
+    private async Task<IEnumerable<TopicConfigurationSet>> GenerateMonitoringTopicsAsync(ServiceBusMetricsOptionsAccount account)
+    {
+        _logger.LogDebug("Generating Monitoring Subject for {ResourceGroup} and {Namespace}", account.ResourceGroup, account.Namespace);
+        var serviceBusNamespace = await GetServiceBusNamespaceAsync(account.ResourceGroup, account.Namespace, _token);
+        var haystack = await serviceBusNamespace.GetServiceBusTopics().GetAllAsync().Select(item=> item.Data.Name).ToListAsync(_token);
+        var topics = ApplyWildcardToFilterList(haystack, account.Topics);
+        var result = await Task.WhenAll(topics.Select(async topic =>
+        {
+            ServiceBusTopic topicArm = await serviceBusNamespace.GetServiceBusTopics().GetAsync(topic, _token);
+            var subscriptions = await topicArm.GetServiceBusSubscriptions().GetAllAsync().Select(item => item.Data.Name).ToListAsync(_token);
+            return CreateTopicConfigurationSet(account.ResourceGroup, account.Namespace, topic, subscriptions);
+        }));
+        _logger.LogDebug("Finished. Applying filters to Topics: {Topics}, filtered topics: {FilteredTopics}", haystack, result.Select(x => x.Topic));
         return result;
     }
 
@@ -60,9 +77,12 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
         _logger.LogDebug("Acquiring Azure Resource Manager credentials");
         _armClient = new ArmClient(new DefaultAzureCredential());
         _logger.LogDebug("Finished acquiring Azure Resource Manager credentials");
-        var monitoringTasks = (_config.Accounts ?? Array.Empty<ServiceBusQueueMetricsOptionsAccount>()).Select(GenerateMonitoringSubjectForAsync).ToList();
-        await Task.WhenAll(monitoringTasks);
-        _monitorSubjects = monitoringTasks.SelectMany(task => task.Result);
+        var monitoringTasks = (_config.Accounts ?? Array.Empty<ServiceBusMetricsOptionsAccount>()).Select(GenerateMonitoringQueuesAsync).ToList();
+        
+        _monitorQueues = (await Task.WhenAll(monitoringTasks)).SelectMany(task => task);
+        
+        var topicsMonitoringTasks =  await Task.WhenAll((_config.Accounts ?? Array.Empty<ServiceBusMetricsOptionsAccount>()).Select(GenerateMonitoringTopicsAsync).ToList());
+        _monitorTopics = topicsMonitoringTasks.SelectMany(task => task);
         
         _timer = new Timer(DoWork, null, TimeSpan.Zero, TimeSpan.FromSeconds(_config.IntervalInSeconds));
         _token = cancellationToken;
@@ -76,27 +96,43 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
         return Task.CompletedTask;
     }
 
-    private static ConfigurationSet GetMetricsSetupFromConnectionString(string? resourceGroup, string? namespaceName, string queue)
-    {
-        return new ConfigurationSet(
-            resourceGroup,
-            namespaceName,
-            queue,
+    private static GaugeSet CreateGaugeSet(string basename, params string[] nameParams) =>
+        new(
             Metrics.CreateGauge(
-                GetMetricsNameFor("queue", "active_message_count", namespaceName,
-                    queue),
+                GetMetricsNameFor(basename, "active_message_count", nameParams),
                 "Active message count"),
-            Metrics.CreateGauge(GetMetricsNameFor("queue", "dead_letter_message_count", namespaceName, queue),
+            Metrics.CreateGauge(GetMetricsNameFor(basename, "dead_letter_message_count", nameParams),
                 "Dead letter message count"),
-            Metrics.CreateGauge(GetMetricsNameFor("queue", "scheduled_message_count", namespaceName, queue),
+            Metrics.CreateGauge(GetMetricsNameFor(basename, "scheduled_message_count", nameParams),
                 "Scheduled message count"),
             Metrics.CreateGauge(
-                GetMetricsNameFor("queue", "transfer_dead_letter_message_count", namespaceName, queue),
+                GetMetricsNameFor(basename, "transfer_dead_letter_message_count", nameParams),
                 "Transfer dead letter message count"),
-            Metrics.CreateGauge(GetMetricsNameFor("queue", "transfer_message_count", namespaceName, queue),
+            Metrics.CreateGauge(GetMetricsNameFor(basename, "transfer_message_count", nameParams),
                 "Transfer message count"),
-            Metrics.CreateGauge(GetMetricsNameFor("queue", "message_count", namespaceName, queue), "Message count")
+            Metrics.CreateGauge(GetMetricsNameFor(basename, "message_count", nameParams), "Message count")
         );
+
+    private static QueueConfigurationSet CreateQueueMetricsSetup(string? resourceGroup, string? namespaceName, string queue)
+    {
+        Debug.Assert(resourceGroup != null, nameof(resourceGroup) + " != null");
+        Debug.Assert(namespaceName != null, nameof(namespaceName) + " != null");
+        return new QueueConfigurationSet(
+            resourceGroup,
+            namespaceName,
+            queue, CreateGaugeSet("queue", resourceGroup, namespaceName, queue));
+    }
+    
+    private static TopicConfigurationSet CreateTopicConfigurationSet(string? resourceGroup, string? namespaceName, string topic, IEnumerable<string> subscriptions)
+    {
+        Debug.Assert(resourceGroup != null, nameof(resourceGroup) + " != null");
+        Debug.Assert(namespaceName != null, nameof(namespaceName) + " != null");
+        return new TopicConfigurationSet(
+            resourceGroup,
+            namespaceName,
+            topic, 
+            CreateGaugeSet("topic", resourceGroup, namespaceName, topic),
+            Array.Empty<SubscriptionConfigurationSet>());
     }
 
     private async Task<ServiceBusNamespace> GetServiceBusNamespaceAsync(string? resourceGroup, string? namespaceName, CancellationToken cancellationToken=default)
@@ -112,32 +148,32 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
         _serviceBusNamespaceCache[cacheKey] = serviceBusNamespace;
         return serviceBusNamespace;
     }
-    private async Task CreateUpdateMetricForServiceBusQueueTask(ConfigurationSet configurationSet,
+    private async Task CreateUpdateMetricForServiceBusQueueTask(QueueConfigurationSet queueConfigurationSet,
         CancellationToken cancellationToken = default)
     {
         
-        _logger.LogDebug("Starting to update metrics for {NamespaceName} and {Queue}", configurationSet.NamespaceName,
-            configurationSet.Queue);
-        var serviceBusNamespace = await GetServiceBusNamespaceAsync(configurationSet.ResourceGroup,
-            configurationSet.NamespaceName, cancellationToken);
+        _logger.LogDebug("Starting to update metrics for {NamespaceName} and {Queue}", queueConfigurationSet.NamespaceName,
+            queueConfigurationSet.Queue);
+        var serviceBusNamespace = await GetServiceBusNamespaceAsync(queueConfigurationSet.ResourceGroup,
+            queueConfigurationSet.NamespaceName, cancellationToken);
 
         ServiceBusQueue queue = await serviceBusNamespace.GetServiceBusQueues()
-            .GetAsync(configurationSet.Queue, cancellationToken);
+            .GetAsync(queueConfigurationSet.Queue, cancellationToken);
 
         if (queue.Data.CountDetails.ActiveMessageCount != null)
-            configurationSet.ActiveMessageCount.Set((double)queue.Data.CountDetails.ActiveMessageCount);
+            queueConfigurationSet.Gauges.ActiveMessageCount.Set((double)queue.Data.CountDetails.ActiveMessageCount);
         if (queue.Data.CountDetails.DeadLetterMessageCount != null)
-            configurationSet.DeadLetterMessageCount.Set((double)queue.Data.CountDetails.DeadLetterMessageCount);
+            queueConfigurationSet.Gauges.DeadLetterMessageCount.Set((double)queue.Data.CountDetails.DeadLetterMessageCount);
         if (queue.Data.CountDetails.ScheduledMessageCount != null)
-            configurationSet.ScheduledMessageCount.Set((double)queue.Data.CountDetails.ScheduledMessageCount);
+            queueConfigurationSet.Gauges.ScheduledMessageCount.Set((double)queue.Data.CountDetails.ScheduledMessageCount);
         if (queue.Data.CountDetails.TransferDeadLetterMessageCount != null)
-            configurationSet.TransferDeadLetterMessageCount.Set((double)queue.Data.CountDetails
+            queueConfigurationSet.Gauges.TransferDeadLetterMessageCount.Set((double)queue.Data.CountDetails
                 .TransferDeadLetterMessageCount);
         if (queue.Data.CountDetails.TransferMessageCount != null)
-            configurationSet.TransferMessageCount.Set((double)queue.Data.CountDetails.TransferMessageCount);
-        if (queue.Data.MessageCount != null) configurationSet.MessageCount.Set((double)queue.Data.MessageCount);
+            queueConfigurationSet.Gauges.TransferMessageCount.Set((double)queue.Data.CountDetails.TransferMessageCount);
+        if (queue.Data.MessageCount != null) queueConfigurationSet.Gauges.MessageCount.Set((double)queue.Data.MessageCount);
         _logger.LogDebug("Finished updating metrics for {NamespaceName} and {Queue}: {@CountDetails}, {MessageCount}",
-            configurationSet.NamespaceName, configurationSet.Queue,
+            queueConfigurationSet.NamespaceName, queueConfigurationSet.Queue,
             queue.Data.CountDetails, queue.Data.MessageCount);
     }
 
@@ -151,7 +187,7 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
 
         _isWorking = true;
         _logger.LogDebug("{ClassName} is working", GetType().Name);
-        var accountTasks = (_monitorSubjects ?? Array.Empty<ConfigurationSet>())
+        var accountTasks = (_monitorQueues ?? Array.Empty<QueueConfigurationSet>())
             .Select(item => CreateUpdateMetricForServiceBusQueueTask(item, _token))
             .ToArray();
         Task.WaitAll(accountTasks, _token);
@@ -159,7 +195,15 @@ public class ServiceBusQueueMetricsService : IHostedService, IDisposable
         _isWorking = false;
     }
 
-    private record struct ConfigurationSet(string? ResourceGroup, string? NamespaceName,
-        string Queue, Gauge ActiveMessageCount, Gauge DeadLetterMessageCount, Gauge ScheduledMessageCount,
+    private record struct GaugeSet(Gauge ActiveMessageCount, Gauge DeadLetterMessageCount, Gauge ScheduledMessageCount,
         Gauge TransferDeadLetterMessageCount, Gauge TransferMessageCount, Gauge MessageCount);
+    private record struct QueueConfigurationSet(string? ResourceGroup, string? NamespaceName,
+        string Queue, GaugeSet Gauges);
+    
+    private record struct TopicConfigurationSet(string? ResourceGroup, string? NamespaceName,
+        string Topic, GaugeSet TopicGauges, IEnumerable<SubscriptionConfigurationSet> SubscriptionConfigurationSets);
+    
+    private record struct SubscriptionConfigurationSet(string? ResourceGroup, string? NamespaceName,
+        string Topic, string Subscription, GaugeSet SubscriptionGauges);
+    
 }
