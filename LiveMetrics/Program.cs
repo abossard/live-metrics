@@ -25,7 +25,7 @@ try
         builder.Configuration.GetSection("LiveMetrics").GetSection(nameof(ServiceBusMetricsOptions))
     );
     builder.Services.AddHostedService<StorageAccountMetricsService>();
-    builder.Services.AddHostedService<ServiceBusQueueMetricsService>();
+    builder.Services.AddHostedService<ServiceBusMetricsService>();
     var app = builder.Build();
     app.UseSerilogRequestLogging();
 

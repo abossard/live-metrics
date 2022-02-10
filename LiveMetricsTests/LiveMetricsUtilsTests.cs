@@ -38,10 +38,10 @@ public class LiveMetricsUtilsTests
             "match-tail",
             "full-match"
         };
-        
+
         // act
         var result = LiveMetricsUtils.ApplyWildcardToFilterList(haystack, needles);
-        
+
         // assert
         result.Should().BeEquivalentTo(goal);
     }

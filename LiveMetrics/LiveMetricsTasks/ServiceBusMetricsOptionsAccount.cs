@@ -8,6 +8,6 @@ public class ServiceBusMetricsOptionsAccount
     public string? ResourceGroup { get; set; }
     public string? Namespace { get; set; }
     public string[]? Queues { get; set; }
-    
+
     public string[]? Topics { get; set; }
 }
